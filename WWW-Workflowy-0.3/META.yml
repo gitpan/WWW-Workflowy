@@ -18,5 +18,7 @@ no_index:
     - t
     - inc
 requires:
+  LWP: 0.01
   PadWalker: 0.01
-version: 0.2
+  autobox: 0.01
+version: 0.3

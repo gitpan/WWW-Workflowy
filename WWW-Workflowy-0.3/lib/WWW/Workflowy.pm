@@ -12,10 +12,10 @@ use JSON::PP;
 use POSIX 'floor';
 use Carp;
 
-our $VERSION = '0.2';
+our $VERSION = '0.3';
 
-# XXX need a public find_node()
-# XXX need a get_parent( $node ), and other traversal stuff
+# XXX need a public get_parent( $node ), and other traversal stuff.  we have a _find_parent() (which uses the recursive find logic).
+# notes in /home/scott/projects/perl/workflowy_notes.txt
 
 # use autobox::Closure::Attributes;  # XXX hacked up local copy that permits lvalue assigns
 
@@ -250,7 +250,7 @@ sub new {
     
         my $response = $user_agent->request($http_request);
         if( $response->is_error ) {
-           die $response->error_as_HTML ;
+           confess $response->error_as_HTML ;
         }
     
         my $decoded_content = $response->decoded_content;
@@ -550,6 +550,9 @@ sub new {
         # "new_most_recent_operation_transaction_id": "106843573"
         # warn Data::Dumper::Dumper $result_json;
 
+        # warn JSON::PP->new->pretty->encode( $push_poll_data ); # <--- good for debugging
+        # warn JSON::PP->new->pretty->encode( $result_json );
+
         $result_json->{results}->[0]->{error} and die "workflowy.com request failed with an error: ``$result_json->{results}->[0]->{error}''; response was: $decoded_content\npush_poll_data is: " . JSON::PP->new->pretty->encode( $push_poll_data );
 
         $last_transaction_id = $result_json->{results}->[0]->{new_most_recent_operation_transaction_id} or confess "no new_most_recent_operation_transaction_id in sync changes\nresponse was: $decoded_content\npush_poll_data was: " . JSON::PP->new->pretty->encode( $push_poll_data );
@@ -680,7 +683,7 @@ sub _find {
     # temporarily put rootProjectChildren under rootProject so we can recurse through this nicely
 
     local $outline->{rootProject}->{ch} = $outline->{rootProjectChildren};
-    my $fake_root = { lm => 0, nm => undef, id => undef, ch => [ $outline->{rootProject} ], fake => 1, };
+    my $fake_root = { lm => 0, nm => '', id => '0', ch => [ $outline->{rootProject} ], fake => 1, };
 
     return _find_inner( $fake_root, $cb, );
 }
