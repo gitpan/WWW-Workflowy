@@ -12,7 +12,7 @@ use JSON::PP;
 use POSIX 'floor';
 use Carp;
 
-our $VERSION = '0.3';
+our $VERSION = '0.4';
 
 # XXX need a public get_parent( $node ), and other traversal stuff.  we have a _find_parent() (which uses the recursive find logic).
 # notes in /home/scott/projects/perl/workflowy_notes.txt
@@ -45,7 +45,7 @@ B<This module does not use an official Workflowy API!  Consult workflowy.com's T
         },
     );
 
-    $node = $wf->create( 
+    $node_id = $wf->create( 
         parent_id => 'Jxn637Zp-uA5O-Anw2-A4kq-4zqKx7WuJNBN',
         priority  => 3,    # which position in the list of items under the parent to insert this node
         text      => "Don't forget to shave the yak",
@@ -167,7 +167,10 @@ sub AUTOLOAD :lvalue {
 
     my $stash = B::svref_2object($code)->STASH->NAME;
     if( $stash and $stash->can($method) ) {
-        return $stash->can($method)->( $code, @_ );
+        # t/003-live-test.t .............. Can't modify non-lvalue subroutine call at lib/WWW/Workflowy.pm line 170. in perl 5.14.2
+        # goto apparently cheats lvalue detection; cheating detection is adequate for our purposes.
+        # return $stash->can($method)->( $code, @_ ); 
+        @_ = ( $code, @_ ); goto &{ $stash->can($method) };
     }
 
     exists $closed_over->{$attr} or Carp::croak "$code does not close over $attr";

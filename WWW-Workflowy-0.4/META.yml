@@ -19,6 +19,7 @@ no_index:
     - inc
 requires:
   LWP: 0.01
+  LWP::Protocol::https: 0.01
   PadWalker: 0.01
   autobox: 0.01
-version: 0.3
+version: 0.4
