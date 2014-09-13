@@ -12,7 +12,7 @@ use JSON::PP;
 use POSIX 'floor';
 use Carp;
 
-our $VERSION = '0.5';
+our $VERSION = '0.6';
 
 # XXX need a public get_parent( $node ), and other traversal stuff.  we have a _find_parent() (which uses the recursive find logic).
 # notes in /home/scott/projects/perl/workflowy_notes.txt
@@ -30,8 +30,10 @@ B<This module does not use an official Workflowy API!  Consult workflowy.com's T
     use WWW::Workflowy;
 
     my $wf = WWW::Workflowy->new( 
+        # username => '',    # optional:  login credentials for private workflowies
+        # password => '',
         url => 'https://workflowy.com/shared/b141ebc1-4c8d-b31a-e3e8-b9c6c633ca25/',
-        # or else:  guid => 'b141ebc1-4c8d-b31a-e3e8-b9c6c633ca25',
+        # or instead of url:  guid => 'b141ebc1-4c8d-b31a-e3e8-b9c6c633ca25',
     );
 
     $node = $wf->dump;
@@ -57,7 +59,7 @@ B<This module does not use an official Workflowy API!  Consult workflowy.com's T
         text      => "Think of an idea for a color for the bikeshed",
     );
 
-    $wf->delete( node_id => $node->{id} );
+    $wf->delete( $node->{id} );
 
     sleep $wf->polling_interval;  $wf->sync;
 
@@ -83,6 +85,8 @@ The value from the C<id> field is used as the value for C<save_id>, C<node_id>, 
 in other calls.
 
 =head2 new
+
+Takes an optional C<username> and C<password> to access Workflowies that aren't shared.
 
 Takes C<url> resembling C<https://workflowy.com/shared/b141ebc1-4c8d-b31a-e3e8-b9c6c633ca25/> or a L<Workflowy> C<guid> such as C<b141ebc1-4c8d-b31a-e3e8-b9c6c633ca25>.
 
@@ -217,9 +221,13 @@ sub new {
 
     #
 
+    my $share_id;              # stands in temporarily for shared_projectid for newer style URLs that look like https://workflowy.com/s/123abcdeABCDE
+
     if( $args{guid} and ! $args{url} ) {
         # https://workflowy.com/shared/b141ebc1-4c8d-b31a-e3e8-b9c6c633ca25/
         $args{url} = "http://workflowy.com/shared/$args{guid}/";
+    } elsif( $args{url} and $args{url} =~ m{workflowy.com/s/\w+$} ) {
+        ($share_id) = $args{url} =~ m{workflowy.com/s/(\w+)$};
     } elsif( ! $args{guid} and $args{url} ) {
         ($args{guid}) = $args{url} =~ m{/shared/(.*?)/\w*$} or confess "workflowy url doesn't match pattern of ``.*/shared/.*/''";
     } elsif( $args{guid} and $args{url} ) {
@@ -229,12 +237,19 @@ sub new {
         $outline = delete $args{outline};
         $last_transaction_id = $outline->{initialMostRecentOperationTransactionId} or confess "no initialMostRecentOperationTransactionId in serialized outline";
         $date_joined = $outline->{dateJoinedTimestampInSeconds}; # XXX probably have to compute clock skew (diff between time() and this value) and use that when computing $client_timestamp
+    } elsif( $args{username} and $args{password} ) {
+        # okay, they'll get their home node and we can pick out the id from there
     } else {
-        confess "pass guid or url";
+        confess "pass guid or url, or else username and password";
     }
 
     my $workflowy_url = delete $args{url};
     my $shared_projectid = delete $args{guid};
+
+    #
+
+    my $username = delete $args{username};
+    my $password = delete $args{password};
 
     #
 
@@ -245,20 +260,91 @@ sub new {
     my $user_agent = LWP::UserAgent->new(agent => "Mozilla/5.0 (Windows NT 5.1; rv:5.0.1) Gecko/20100101 Firefox/5.0.1");
     $user_agent->cookie_jar or $user_agent->cookie_jar( { } );
 
+    # login
+
+    if( $username and $password )  {
+
+        # get a cookie assigned to us
+
+        my $r = HTTP::Request->new( GET => "https://workflowy.com/" );
+        my $response = $user_agent->request($r);
+# warn $response->as_string();
+# warn "cookie jar: " . $user_agent->cookie_jar->as_string();
+
+        # send login info
+
+        my $referer = 'https://workflowy.com/';
+
+    try_login_again:
+
+        $r = HTTP::Request->new( POST => "https://workflowy.com/accounts/login" );
+        # $r->header( 'Content-Type'     => 'application/x-www-form-urlencoded; charset=UTF-8' );
+        $r->header( 'Content-Type'     => 'application/x-www-form-urlencoded' );
+        $r->header( Referer => $referer );
+        $user_agent->cookie_jar->add_cookie_header( $r );
+        my $post = '';
+        $post .= 'username=' . _escape($username) . '&password=' . _escape($password);
+        $r->content( $post );
+# warn $r->as_string();
+        $response = $user_agent->request($r);
+        if( $response->is_error ) {
+           confess "error: " . $response->error_as_HTML;
+           return;
+        }
+# warn $response->as_string();
+# warn "cookie jar: " . $user_agent->cookie_jar->as_string();
+        $referer = 'https://workflowy.com/accounts/login';
+
+        if( $response->code == 301 or $response->code == 302 ) {
+            my $location = $response->header('Location') or die;
+# warn "location: $location";   # should send us to https://workflowy.com
+            if( $location eq 'https://workflowy.com/accounts/login' ) {
+# warn "well, shit, trying to login again XXXX";
+                goto try_login_again;
+            } 
+            $r = HTTP::Request->new( POST => $location );
+            $r->header( 'Content-Type'     => 'application/x-www-form-urlencoded; charset=UTF-8' );
+            $r->content( $post );
+            $r->header( Referer => 'https://workflowy.com/accounts/login' );
+            $user_agent->cookie_jar->add_cookie_header( $r );
+            # warn $r->as_string();
+            $response = $user_agent->request($r);
+# warn $response->as_string();
+            # warn "cookie jar: " . $user_agent->cookie_jar->as_string();
+        }
+    };
+
     #
 
     my $fetch_outline = sub {
 
-        my $http_request = HTTP::Request->new( GET => "http://workflowy.com/get_initialization_data?shared_projectid=$shared_projectid" );
+        my $http_request;
+        if( $shared_projectid) {
+            # $http_request = HTTP::Request->new( GET => "https://workflowy.com/get_initialization_data?share_id=$shared_projectid&client_version=14" ); # do we have to start doing this instead?
+            $http_request = HTTP::Request->new( GET => "https://workflowy.com/get_initialization_data?shared_projectid=$shared_projectid" );
+        } elsif($share_id) {
+            $http_request = HTTP::Request->new( GET => "https://workflowy.com/get_initialization_data?share_id=$share_id&client_version=14" );
+        } else {
+            $http_request = HTTP::Request->new( GET => "https://workflowy.com/get_initialization_data?client_version=14" );
+        }
+        $user_agent->cookie_jar->add_cookie_header( $http_request );
+        $http_request->header( Accept => 'application/json, text/javascript, */*; q=0.01' );
+        $http_request->header( 'Accept-Encoding' => 'gzip, deflate' );
+        $http_request->header( Referer => 'https://workflowy.com/' );
+        $http_request->header( 'X-Requested-With' => 'XMLHttpRequest' );
+
+        # warn $http_request->as_string;
     
         my $response = $user_agent->request($http_request);
         if( $response->is_error ) {
-           confess $response->error_as_HTML ;
+           confess $http_request->uri ."\n" . $response->error_as_HTML ;
         }
     
         my $decoded_content = $response->decoded_content or die "no response content";
 
         my $response_json = decode_json $decoded_content or die "failed to decode response as JSON";
+
+        $shared_projectid ||= $response_json->{projectTreeData}->{mainProjectTreeInfo}->{rootProject}->{id};  # happens with new style /s/123abcdefg style URLs that we don't know the shared_projectid until we etch it by the share_id
 
         $client_id = $response_json->{projectTreeData}->{clientId} or die "couldn't find clientId in project JSON";
 
@@ -359,9 +445,13 @@ sub new {
         my $node_id = delete $args{node_id};
         my $text = delete $args{text};
 
-        # for cmd=create
+        # for cmd=create and cmd=move
         my $parent_id = delete $args{parent_id};
         my $priority = delete $args{priority};
+
+        # for cmd=move
+        my $previous_parent_id = delete $args{previous_parent_id};
+        my $previous_priority = delete $args{previous_priority};
 
         confess "unknown args to update_outline: " . join ', ', keys %args if keys %args;
 
@@ -389,6 +479,30 @@ sub new {
             };
 
             $local_edit_node->( node => $node, text => $text );
+
+        } elsif( $cmd eq 'move' ) {
+
+            my $node = _find_node( $outline, $node_id ) or confess "couldn't find node for $node_id in move in update_outline";
+
+            # queue the changes to get pushed up to workflowy
+
+# [{"most_recent_operation_transaction_id":"186341078","operations":[{"type":"move","data":{"projectid":"1b3043b6-236d-dbd0-da7f-22c3cfcd1748","parentid":"0f60f496-5356-9040-72e6-2d3d5f94cd7c","priority":1},"client_timestamp":503732,"undo_data":{"previous_parentid":"0f60f496-5356-9040-72e6-2d3d5f94cd7c","previous_priority":4,"previous_last_modified":503353}}],"shared_projectid":"0af677e2-d205-22c8-bca6-2071a0e11ad7"}]
+
+            push @$operations, {
+                type => 'move',
+                client_timestamp => $client_timestamp,
+                data => {
+                    projectid => $node_id,
+                    parentid  => $parent_id,
+                    priority  => $priority,
+                },
+                undo_data => {
+                    previous_parentid => $previous_parent_id,
+                    previous_priority => $previous_priority,
+                },
+            };
+
+            $local_move_node->( node => $node, node_id => $node_id, parent_id => $parent_id, priority => $priority, );
 
         } elsif( $cmd eq 'create' ) {
 
@@ -509,6 +623,7 @@ sub new {
     my $sync_changes = sub {
 
         my $r = HTTP::Request->new( POST => "https://workflowy.com/push_and_poll" );
+        $user_agent->cookie_jar->add_cookie_header( $r );
 
         $r->header( 'X-Requested-With' => 'XMLHttpRequest' );
         $r->header( 'Content-Type'     => 'application/x-www-form-urlencoded; charset=UTF-8' );
@@ -518,9 +633,15 @@ sub new {
 
         my $push_poll_data = [{
             most_recent_operation_transaction_id => $last_transaction_id,
-            shared_projectid => $shared_projectid,
+            # shared_projectid => $shared_projectid,
             operations => $operations,
         }];
+
+        if( $share_id ) {
+            $push_poll_data->[0]->{share_id} = $share_id; 
+        } else {
+            $push_poll_data->[0]->{shared_projectid} = $shared_projectid;
+        }
 
         my $post = '';
         $post .= 'client_id=' . _escape($client_id);
@@ -599,6 +720,27 @@ sub new {
             return 1;
         }
 
+# [{"most_recent_operation_transaction_id":"186341078","operations":[{"type":"move","data":{"projectid":"1b3043b6-236d-dbd0-da7f-22c3cfcd1748","parentid":"0f60f496-5356-9040-72e6-2d3d5f94cd7c","priority":1},"client_timestamp":503732,"undo_data":{"previous_parentid":"0f60f496-5356-9040-72e6-2d3d5f94cd7c","previous_priority":4,"previous_last_modified":503353}}],"shared_projectid":"0af677e2-d205-22c8-bca6-2071a0e11ad7"}]
+
+        if( $action eq 'move' ) {
+
+            my %args = @_;
+            my $node_id = delete $args{node_id} or confess "pass a node_id parameter";
+            my ( $parent_node, $node, $previous_priority, $siblings ) = _find_parent($outline, $node_id ) or confess "could not find node ``$node_id'' in ->move()";
+            my $parent_id = delete $args{parent_id} || $parent_node->{id};   # useful if the user only wants to update the priority
+            my $priority = delete $args{priority} || 0;  # useful if the user only wants to change the parent and is okay with it going to the head of the list
+
+            return $update_outline->(
+                cmd                     => 'move',
+                node_id                 => $node_id,
+                parent_id               => $parent_id,                 # for cmd=create
+                priority                => $priority,                  # for cmd=create
+                previous_parent_id      => $parent_node->{id},
+                previous_priority       => $previous_priority,
+            );
+
+        }
+
         if( $action eq 'create' ) {
 
             # $update_outline returns the id of the newly created node for cmd='create'
@@ -651,8 +793,9 @@ sub new {
 }
 
 sub edit { my $self = shift; $self->( 'edit', @_ ); }
+sub move { my $self = shift; $self->( 'move', @_ ); }
 sub create { my $self = shift; $self->( 'create', @_ ); }
-sub delete { my $self = shift; $self->( 'delete', @_ ); }
+sub delete { my $self = shift; my $node_id = ref($_[0]) ? $_[0]->{id} : $_[0]; $self->( 'delete', node_id => $node_id, ); }
 sub sync { my $self = shift; $self->( 'sync', @_ ); }
 sub fetch { my $self = shift; $self->( 'fetch', @_ ); }
 

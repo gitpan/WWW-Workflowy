@@ -80,9 +80,7 @@ ok $node, "after edit, can find the node by its new text";
 # $wf->fetch;
 # $wf->sync;
 
-$wf->delete(
-    node_id => $node_id,
-);
+$wf->delete( $node_id,);
 
 $node = $wf->find(
     sub {
